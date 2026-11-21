@@ -27,7 +27,7 @@ dev:
 	# On Windows use separate shells or run via docker-compose
 
 test:
-	cd backend && pytest tests/ -v
+	cd backend && python -m pytest tests/ -v
 
 lint:
 	ruff check backend/app backend/tests
