@@ -1,5 +1,5 @@
 import os
-import shutil
+import hashlib
 import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, status
@@ -41,66 +41,69 @@ async def upload_documents(
     """Multi-file upload with background chunking and vector indexing."""
     await _check_collection_access(collection_id, current_user, db)
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    created_docs: List[Document] = []
+    prepared: list[dict] = []
+    to_ingest: list[tuple[dict, Document]] = []
+    created_docs: list[Document] = []
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    try:
+        for file in files:
+            filename = sanitize_input(file.filename or "unknown_file").replace("/", "_").replace("\\", "_")[:180]
+            is_valid, err_msg = validate_file(filename, 0, max_mb=settings.MAX_UPLOAD_SIZE_MB)
+            if not is_valid:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_msg)
+            file_type = os.path.splitext(filename)[1].lower().lstrip(".")
+            doc_id = str(uuid.uuid4())
+            save_path = os.path.join(settings.UPLOAD_DIR, f"{doc_id}_{filename}")
+            item = {
+                "id": doc_id, "filename": filename, "file_type": file_type,
+                "path": save_path, "size": 0, "hash": "",
+            }
+            prepared.append(item)
+            file_size = 0
+            with open(save_path, "wb") as output:
+                while block := await file.read(1024 * 1024):
+                    file_size += len(block)
+                    if file_size > max_bytes:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"File exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB}MB",
+                        )
+                    output.write(block)
+            item["size"] = file_size
+            item["hash"] = compute_file_hash(save_path)
 
-    for file in files:
-        filename = sanitize_input(file.filename or "unknown_file")
-        ext = os.path.splitext(filename)[1].lower()
-        file_type = ext.replace(".", "")
-
-        # Read into temp storage to compute hash and validate
-        doc_uuid = str(uuid.uuid4())
-        save_path = os.path.join(settings.UPLOAD_DIR, f"{doc_uuid}_{filename}")
-        with open(save_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        file_size = os.path.getsize(save_path)
-        is_valid, err_msg = validate_file(filename, file_size, max_mb=settings.MAX_UPLOAD_SIZE_MB)
-        if not is_valid:
-            if os.path.exists(save_path):
-                os.remove(save_path)
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_msg)
-
-        file_hash = compute_file_hash(save_path)
-
-        # Duplicate check per user
-        dup_res = await db.execute(
-            select(Document).where(Document.file_hash == file_hash, Document.user_id == current_user.id)
-        )
-        existing_doc = dup_res.scalar_one_or_none()
-        if existing_doc and existing_doc.status == "indexed":
-            # Document already indexed; skip re-indexing
-            created_docs.append(existing_doc)
-            if os.path.exists(save_path):
-                os.remove(save_path)
-            continue
-
-        new_doc = Document(
-            id=doc_uuid,
-            collection_id=collection_id,
-            user_id=current_user.id,
-            filename=filename,
-            file_type=file_type,
-            file_size_bytes=file_size,
-            file_hash=file_hash,
-            storage_path=save_path,
-            status="pending",
-        )
-        db.add(new_doc)
+        # Validate every file before creating rows or launching any background job.
+        for item in prepared:
+            duplicate = await db.scalar(
+                select(Document).where(Document.file_hash == item["hash"], Document.user_id == current_user.id)
+            )
+            if duplicate and duplicate.status == "indexed":
+                created_docs.append(duplicate)
+                os.remove(item["path"])
+                continue
+            document = Document(
+                id=item["id"], collection_id=collection_id, user_id=current_user.id,
+                filename=item["filename"], file_type=item["file_type"],
+                file_size_bytes=item["size"], file_hash=item["hash"],
+                storage_path=item["path"], status="pending",
+            )
+            db.add(document)
+            created_docs.append(document)
+            to_ingest.append((item, document))
         await db.commit()
-        await db.refresh(new_doc)
-        created_docs.append(new_doc)
-
-        # Trigger async ingestion
-        background_tasks.add_task(
-            process_document_ingestion,
-            document_id=doc_uuid,
-            file_path=save_path,
-            file_type=file_type,
-            collection_id=collection_id,
-        )
-
-    return created_docs
+        for item, document in to_ingest:
+            await db.refresh(document)
+            background_tasks.add_task(
+                process_document_ingestion, document_id=item["id"], file_path=item["path"],
+                file_type=item["file_type"], collection_id=collection_id,
+            )
+        return created_docs
+    except Exception:
+        await db.rollback()
+        for item in prepared:
+            if os.path.exists(item["path"]):
+                os.remove(item["path"])
+        raise
 
 
 @router.post("/url", response_model=DocumentResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -114,7 +117,6 @@ async def ingest_url(
     doc_uuid = str(uuid.uuid4())
     await _check_collection_access(payload.collection_id, current_user, db)
     filename = payload.title or payload.url[:60]
-    import hashlib
     file_hash = hashlib.sha256(payload.url.encode("utf-8")).hexdigest()
 
     new_doc = Document(
@@ -153,7 +155,6 @@ async def ingest_youtube(
     await _check_collection_access(payload.collection_id, current_user, db)
     doc_uuid = str(uuid.uuid4())
     filename = payload.title or f"YouTube Video ({payload.youtube_url[:30]})"
-    import hashlib
     file_hash = hashlib.sha256(payload.youtube_url.encode("utf-8")).hexdigest()
 
     new_doc = Document(
