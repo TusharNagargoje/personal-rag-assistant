@@ -58,6 +58,7 @@ next-env.d.ts
 *.sqlite3
 data/uploads/*
 !data/uploads/.gitkeep
+**/data/uploads/*
 data/vector_store/*
 !data/vector_store/.gitkeep
 qdrant_storage/

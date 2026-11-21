@@ -1,0 +1,14 @@
+[
+  {
+    "document": "../../data/sample/knowledge_base.md",
+    "question": "What is retrieval augmented generation?",
+    "reference_answer": "Retrieval augmented generation retrieves relevant source passages and uses them as context for a language model response.",
+    "required_terms": ["retrieves", "source", "context"]
+  },
+  {
+    "document": "../../data/sample/knowledge_base.md",
+    "question": "What should the assistant do when its sources do not contain the answer?",
+    "reference_answer": "It should say that the available sources do not provide enough information.",
+    "required_terms": ["not enough information"]
+  }
+]
