@@ -1,0 +1,35 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+      - id: detect-private-key
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.13
+    hooks:
+      - id: ruff
+        args: [--fix]
+  - repo: https://github.com/psf/black
+    rev: 25.1.0
+    hooks:
+      - id: black
+        language_version: python3.11
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0
+    hooks:
+      - id: mypy
+        args: [--ignore-missing-imports]
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: npm --prefix frontend run lint -- --fix
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+      - id: prettier
+        name: prettier
+        entry: npm --prefix frontend exec prettier -- --write
+        language: system
+        types_or: [javascript, jsx, ts, tsx, json, yaml, markdown]
